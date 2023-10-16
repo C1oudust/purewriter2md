@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	_ "github.com/glebarez/go-sqlite"
 	"log"
 	"os"
@@ -93,7 +94,7 @@ func CreateFolder(folderName string, folderList []Folder) {
 		outPath := path.Join(folderName, folderPath)
 
 		_ = os.MkdirAll(outPath, 0755)
-		err := CreateMeta(folder, outPath)
+		err := CreateFolderMeta(folder, outPath)
 		if err != nil {
 			log.Println("create meta.json failed:", err)
 		}
@@ -112,7 +113,8 @@ func CreateFolder(folderName string, folderList []Folder) {
 			}
 			defer file.Close()
 			// markdown line wrapping
-			_, err = file.WriteString(strings.ReplaceAll(article.Content, "\n", "\n\n"))
+			content := strings.ReplaceAll(article.Content, "\n", "\n\n")
+			_, err = file.WriteString(CreateArticleMeta(article) + content)
 			if err != nil {
 				log.Println("write md failed:", err)
 			}
@@ -120,7 +122,7 @@ func CreateFolder(folderName string, folderList []Folder) {
 	}
 }
 
-func CreateMeta(folder Folder, outPath string) error {
+func CreateFolderMeta(folder Folder, outPath string) error {
 	file, _ := os.Create(path.Join(outPath, "meta.json"))
 	defer file.Close()
 	data, _ := json.MarshalIndent(map[string]interface{}{
@@ -132,4 +134,17 @@ func CreateMeta(folder Folder, outPath string) error {
 	}, "", "  ")
 	_, err := file.Write(data)
 	return err
+}
+
+func CreateArticleMeta(article Article) (meta string) {
+	createTime := time.Unix(article.CreateTime/1000, 0).Format("2006-01-02 15:04:05")
+	updateTime := time.Unix(article.UpdateTime/1000, 0).Format("2006-01-02 15:04:05")
+
+	meta = fmt.Sprintf(`---
+create: %s
+update: %s
+---
+
+`, createTime, updateTime)
+	return
 }
