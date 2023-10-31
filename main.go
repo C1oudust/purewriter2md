@@ -30,9 +30,14 @@ type Article struct {
 	Summary    string
 	Count      int
 	FolderID   string
+	CategoryID string
+	Rank       int
+
 	UpdateTime int64
 	CreateTime int64
 }
+
+var needMeta = false
 
 func main() {
 	args := os.Args
@@ -47,6 +52,19 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	var flag string
+
+	fmt.Printf("Output md file metadata?(y/n): ")
+	_, err = fmt.Scanln(&flag)
+	if err != nil {
+		fmt.Println("input err:", err)
+		return
+	}
+
+	if flag == "Y" || flag == "y" {
+		needMeta = true
+	}
+
 	log.Println("reading purewriter database...")
 	defer db.Close()
 
@@ -63,14 +81,14 @@ func main() {
 		if err = rows.Scan(&folder.ID, &folder.Name, &folder.CreatedTime, &folder.Description, &folder.Tags); err != nil {
 			log.Fatal(err)
 		}
-		query = `SELECT a.id, COALESCE(a.title, '') as title, a.content, COALESCE(a.summary, '') as summary, COALESCE(a.count, 0) as  count, a.folderId, a.updateTime, a.createTime FROM  Article a WHERE a.folderId=?`
+		query = `SELECT a.id, COALESCE(a.title, '') as title, a.content, COALESCE(a.summary, '') as summary, COALESCE(a.count, 0) as  count, a.folderId, COALESCE(a.categoryId, '') as  categoryId, a.rank, a.updateTime, a.createTime FROM  Article a WHERE a.folderId=?`
 		as, err := db.Query(query, folder.ID)
 		if err != nil {
 			log.Fatal(err)
 		}
 		for as.Next() {
 			var article Article
-			if err = as.Scan(&article.ID, &article.Title, &article.Content, &article.Summary, &article.Count, &article.FolderID, &article.UpdateTime, &article.CreateTime); err != nil {
+			if err = as.Scan(&article.ID, &article.Title, &article.Content, &article.Summary, &article.Count, &article.FolderID, &article.CategoryID, &article.Rank, &article.UpdateTime, &article.CreateTime); err != nil {
 				log.Fatal(err)
 			}
 			folder.Articles = append(folder.Articles, article)
@@ -139,12 +157,13 @@ func CreateFolderMeta(folder Folder, outPath string) error {
 func CreateArticleMeta(article Article) (meta string) {
 	createTime := time.Unix(article.CreateTime/1000, 0).Format("2006-01-02 15:04:05")
 	updateTime := time.Unix(article.UpdateTime/1000, 0).Format("2006-01-02 15:04:05")
-
-	meta = fmt.Sprintf(`---
+	if needMeta {
+		meta = fmt.Sprintf(`---
 create: %s
 update: %s
 ---
 
 `, createTime, updateTime)
+	}
 	return
 }
