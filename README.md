@@ -22,5 +22,5 @@ purewriter2md is a tool to export PureWriter database to Markdown file
 ## Other
 
 - Each book will be exported as a folder, and the specific information of the book will be exported as a separate
-  mate.json, including the book's description, tags, etc.
+  meta.json, including the book's description, tags, etc.
 - I use this tool to export Markdown in order to quickly migrate to Obsidian.
