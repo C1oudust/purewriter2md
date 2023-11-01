@@ -7,37 +7,17 @@ import (
 	"fmt"
 	_ "github.com/glebarez/go-sqlite"
 	"log"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
-	"time"
 )
 
-type Folder struct {
-	ID          string
-	Name        string
-	CreatedTime int64
-	Description string
-	Tags        string
-	Articles    []Article
-}
-
-type Article struct {
-	ID         string
-	Title      string
-	Content    string
-	Summary    string
-	Count      int
-	FolderID   string
-	CategoryID string
-	Rank       int
-
-	UpdateTime int64
-	CreateTime int64
-}
-
 var needMeta = false
+var db *sql.DB
+var err error
 
 func main() {
 	args := os.Args
@@ -48,16 +28,16 @@ func main() {
 
 	filePath := args[1]
 	filename := strings.Split(filepath.Base(filePath), ".")[0]
-	db, err := sql.Open("sqlite", filePath)
+	db, err = sql.Open("sqlite", filePath)
 	if err != nil {
 		log.Fatal(err)
 	}
 	var flag string
 
-	fmt.Printf("Output md file metadata?(y/n): ")
+	log.Printf("Output md file metadata?(y/n): ")
 	_, err = fmt.Scanln(&flag)
 	if err != nil {
-		fmt.Println("input err:", err)
+		log.Fatal("input err:", err)
 		return
 	}
 
@@ -69,7 +49,7 @@ func main() {
 	defer db.Close()
 
 	var folderList []Folder
-	query := `SELECT f.id, f.name, f.createdTime, COALESCE(f.description, '') as description,COALESCE(f.tags, '') as tags FROM Folder f WHERE NOT f.id=?`
+	query := `SELECT f.id, f.name, f.createdTime, COALESCE(f.description, '') as description,COALESCE(f.tags, '') as tags, f.rank, COALESCE(f.rankMode, '') as rankMode FROM Folder f WHERE NOT f.id=?`
 	rows, err := db.Query(query, "PW_Trash")
 	if err != nil {
 		log.Fatal(err)
@@ -78,7 +58,7 @@ func main() {
 
 	for rows.Next() {
 		var folder Folder
-		if err = rows.Scan(&folder.ID, &folder.Name, &folder.CreatedTime, &folder.Description, &folder.Tags); err != nil {
+		if err = rows.Scan(&folder.ID, &folder.Name, &folder.CreatedTime, &folder.Description, &folder.Tags, &folder.Rank, &folder.RankMode); err != nil {
 			log.Fatal(err)
 		}
 		query = `SELECT a.id, COALESCE(a.title, '') as title, a.content, COALESCE(a.summary, '') as summary, COALESCE(a.count, 0) as  count, a.folderId, COALESCE(a.categoryId, '') as  categoryId, a.rank, a.updateTime, a.createTime FROM  Article a WHERE a.folderId=?`
@@ -117,26 +97,11 @@ func CreateFolder(folderName string, folderList []Folder) {
 			log.Println("create meta.json failed:", err)
 		}
 		log.Println("parse folder:", folder.Name)
-		for _, article := range folder.Articles {
-			filename := article.Title
-			if filename == "" {
-				filename = "Untitled-" + time.Unix(article.CreateTime/1000, 0).Format("2006_01_02_15_04_05")
-			}
-
-			filePath := filepath.Join(outPath, filename+".md")
-			file, err := os.Create(filePath)
-			if err != nil {
-				log.Println("create md failed:", err)
-				continue
-			}
-			defer file.Close()
-			// markdown line wrapping
-			content := strings.ReplaceAll(article.Content, "\n", "\n\n")
-			_, err = file.WriteString(CreateArticleMeta(article) + content)
-			if err != nil {
-				log.Println("write md failed:", err)
-			}
+		if folder.RankMode == "RANK" {
+			CreateCategory(folder, outPath)
+			continue
 		}
+		CreateArticles(folder.Articles, outPath)
 	}
 }
 
@@ -146,7 +111,7 @@ func CreateFolderMeta(folder Folder, outPath string) error {
 	data, _ := json.MarshalIndent(map[string]interface{}{
 		"id":          folder.ID,
 		"name":        folder.Name,
-		"createdTime": folder.CreatedTime,
+		"createdTime": ParseTime(folder.CreatedTime, ""),
 		"description": folder.Description,
 		"tags":        folder.Tags,
 	}, "", "  ")
@@ -155,8 +120,8 @@ func CreateFolderMeta(folder Folder, outPath string) error {
 }
 
 func CreateArticleMeta(article Article) (meta string) {
-	createTime := time.Unix(article.CreateTime/1000, 0).Format("2006-01-02 15:04:05")
-	updateTime := time.Unix(article.UpdateTime/1000, 0).Format("2006-01-02 15:04:05")
+	createTime := ParseTime(article.CreateTime, "")
+	updateTime := ParseTime(article.UpdateTime, "")
 	if needMeta {
 		meta = fmt.Sprintf(`---
 create: %s
@@ -166,4 +131,56 @@ update: %s
 `, createTime, updateTime)
 	}
 	return
+}
+
+func CreateArticles(articles []Article, outPath string) {
+	for _, article := range articles {
+		filename := article.Title
+		if filename == "" {
+			filename = "Untitled-" + ParseTime(article.CreateTime, "2006_01_02_15_04_05")
+		}
+
+		filePath := filepath.Join(outPath, filename+".md")
+		file, err := os.Create(filePath)
+		if err != nil {
+			log.Println("create md failed:", err)
+			continue
+		}
+		defer file.Close()
+		// markdown line wrapping
+		content := strings.ReplaceAll(article.Content, "\n", "\n\n")
+		_, err = file.WriteString(CreateArticleMeta(article) + content)
+		if err != nil {
+			log.Println("write md failed:", err)
+		}
+	}
+}
+
+func CreateCategory(folder Folder, outPath string) {
+	fmt.Println("create rank folder", outPath)
+	query := `SELECT c.id, COALESCE(c.name, '') as name, c.folderID, COALESCE(c.description, '') as description, c.rank, c.updateTime, c.createdTime FROM  Category c WHERE c.folderId=? ORDER BY c.rank ASC`
+	as, err := db.Query(query, folder.ID)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for as.Next() {
+		var category Category
+		if err = as.Scan(&category.ID, &category.Name, &category.FolderID, &category.Description, &category.Rank, &category.UpdateTime, &category.CreatedTime); err != nil {
+			log.Fatal(err)
+		}
+		folderPath := strings.Trim(category.Name, " ")
+		categoryPath := path.Join(outPath, folderPath)
+		_ = os.MkdirAll(categoryPath, 0755)
+
+		var curArticleList []Article
+		for _, a := range folder.Articles {
+			if math.Abs(float64(a.Rank-category.Rank)) < 9999 {
+				curArticleList = append(curArticleList, a)
+			}
+		}
+		sort.Slice(curArticleList, func(i, j int) bool {
+			return curArticleList[i].Rank < curArticleList[j].Rank
+		})
+		CreateArticles(curArticleList, categoryPath)
+	}
 }
