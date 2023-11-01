@@ -34,7 +34,7 @@ func main() {
 	}
 	var flag string
 
-	log.Printf("Output md file metadata?(y/n): ")
+	log.Printf("Output md file time metadata?(y/n): ")
 	_, err = fmt.Scanln(&flag)
 	if err != nil {
 		log.Fatal("input err:", err)
@@ -96,7 +96,7 @@ func CreateFolder(folderName string, folderList []Folder) {
 		if err != nil {
 			log.Println("create meta.json failed:", err)
 		}
-		log.Println("parse folder:", folder.Name)
+		log.Println("parse book:", folder.Name)
 		if folder.RankMode == "RANK" {
 			CreateCategory(folder, outPath)
 			continue
@@ -157,7 +157,6 @@ func CreateArticles(articles []Article, outPath string) {
 }
 
 func CreateCategory(folder Folder, outPath string) {
-	fmt.Println("create rank folder", outPath)
 	query := `SELECT c.id, COALESCE(c.name, '') as name, c.folderID, COALESCE(c.description, '') as description, c.rank, c.updateTime, c.createdTime FROM  Category c WHERE c.folderId=? ORDER BY c.rank ASC`
 	as, err := db.Query(query, folder.ID)
 	if err != nil {
