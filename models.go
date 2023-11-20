@@ -29,6 +29,7 @@ type Article struct {
 	Content    string
 	Summary    string
 	Count      int
+	Extension  string
 	FolderID   string
 	CategoryID string
 	Rank       int

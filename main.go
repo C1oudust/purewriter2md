@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -61,14 +62,14 @@ func main() {
 		if err = rows.Scan(&folder.ID, &folder.Name, &folder.CreatedTime, &folder.Description, &folder.Tags, &folder.Rank, &folder.RankMode); err != nil {
 			log.Fatal(err)
 		}
-		query = `SELECT a.id, COALESCE(a.title, '') as title, a.content, COALESCE(a.summary, '') as summary, COALESCE(a.count, 0) as  count, a.folderId, COALESCE(a.categoryId, '') as  categoryId, a.rank, a.updateTime, a.createTime FROM  Article a WHERE a.folderId=?`
+		query = `SELECT a.id, COALESCE(a.title, '') as title, a.content, COALESCE(a.summary, '') as summary, COALESCE(a.count, 0) as  count, a.extension, a.folderId, COALESCE(a.categoryId, '') as  categoryId, a.rank, a.updateTime, a.createTime FROM  Article a WHERE a.folderId=?`
 		as, err := db.Query(query, folder.ID)
 		if err != nil {
 			log.Fatal(err)
 		}
 		for as.Next() {
 			var article Article
-			if err = as.Scan(&article.ID, &article.Title, &article.Content, &article.Summary, &article.Count, &article.FolderID, &article.CategoryID, &article.Rank, &article.UpdateTime, &article.CreateTime); err != nil {
+			if err = as.Scan(&article.ID, &article.Title, &article.Content, &article.Summary, &article.Count, &article.Extension, &article.FolderID, &article.CategoryID, &article.Rank, &article.UpdateTime, &article.CreateTime); err != nil {
 				log.Fatal(err)
 			}
 			folder.Articles = append(folder.Articles, article)
@@ -139,7 +140,9 @@ func CreateArticles(articles []Article, outPath string) {
 		if filename == "" {
 			filename = "Untitled-" + ParseTime(article.CreateTime, "2006_01_02_15_04_05")
 		}
-
+		regex := regexp.MustCompile(`[\\/:*?"<>|]`)
+		// replace invalid characters to 'x'
+		filename = regex.ReplaceAllString(filename, "x")
 		filePath := filepath.Join(outPath, filename+".md")
 		file, err := os.Create(filePath)
 		if err != nil {
@@ -147,8 +150,12 @@ func CreateArticles(articles []Article, outPath string) {
 			continue
 		}
 		defer file.Close()
-		// markdown line wrapping
-		content := strings.ReplaceAll(article.Content, "\n", "\n\n")
+		content := article.Content
+		if article.Extension == "txt" {
+			// markdown line wrapping
+			content = strings.ReplaceAll(article.Content, "\n", "\n\n")
+		}
+
 		_, err = file.WriteString(CreateArticleMeta(article) + content)
 		if err != nil {
 			log.Println("write md failed:", err)
