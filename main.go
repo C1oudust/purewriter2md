@@ -7,11 +7,8 @@ import (
 	"fmt"
 	_ "github.com/glebarez/go-sqlite"
 	"log"
-	"math"
 	"os"
-	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 )
@@ -139,10 +136,13 @@ func CreateFolder(rootPath string, folderList []Folder) {
 		_ = os.MkdirAll(rootPath, 0755)
 	}
 	for _, folder := range folderList {
-		folderPath := strings.Trim(folder.Name, " ")
-		outPath := path.Join(rootPath, folderPath)
+		folderName := SanitizePathName(folder.Name)
+		outPath := filepath.Join(rootPath, folderName)
 
-		_ = os.MkdirAll(outPath, 0755)
+		if err = os.MkdirAll(outPath, 0755); err != nil {
+			log.Println("create folder failed:", err)
+			continue
+		}
 		err = CreateFolderMeta(folder, outPath)
 		if err != nil {
 			log.Println("create meta.json failed:", err)
@@ -158,15 +158,21 @@ func CreateFolder(rootPath string, folderList []Folder) {
 }
 
 func CreateFolderMeta(folder Folder, outPath string) error {
-	file, _ := os.Create(path.Join(outPath, "meta.json"))
+	file, err := os.Create(filepath.Join(outPath, "meta.json"))
+	if err != nil {
+		return err
+	}
 	defer file.Close()
-	data, _ := json.MarshalIndent(map[string]interface{}{
+	data, err := json.MarshalIndent(map[string]interface{}{
 		"id":          folder.ID,
 		"name":        folder.Name,
 		"createdTime": ParseTime(folder.CreatedTime, ""),
 		"description": folder.Description,
 		"tags":        folder.Tags,
 	}, "", "  ")
+	if err != nil {
+		return err
+	}
 	_, err = file.Write(data)
 	return err
 }
@@ -185,22 +191,49 @@ update: %s
 	return
 }
 
-func CreateArticles(articles []Article, outPath string) {
-	for _, article := range articles {
-		filename := article.Title
-		if filename == "" {
-			filename = "Untitled-" + ParseTime(article.CreateTime, "2006_01_02_15_04_05")
+func ArticleFilename(article Article) string {
+	title := strings.TrimSpace(article.Title)
+	if title == "" {
+		title = BuildUntitledFromContent(article.Content, 20)
+	}
+	if title == "" {
+		title = "Untitled-" + ParseTime(article.CreateTime, "2006_01_02_15_04_05")
+	}
+	return SanitizePathName(title)
+}
+
+func UniqueArticlePath(outPath, filename string) string {
+	filePath := filepath.Join(outPath, filename+".md")
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return filePath
+	}
+	for i := 2; ; i++ {
+		candidate := filepath.Join(outPath, fmt.Sprintf("%s (%d).md", filename, i))
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
 		}
-		regex := regexp.MustCompile(`[\\/:*?"<>|]`)
-		// replace invalid characters to 'x'
-		filename = regex.ReplaceAllString(filename, "x")
-		filePath := filepath.Join(outPath, filename+".md")
+	}
+}
+
+func CreateArticles(articles []Article, outPath string) {
+	ordered := append([]Article(nil), articles...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].Rank == ordered[j].Rank {
+			return ordered[i].CreateTime < ordered[j].CreateTime
+		}
+		return ordered[i].Rank < ordered[j].Rank
+	})
+
+	for _, article := range ordered {
+		filename := ArticleFilename(article)
+		filePath := UniqueArticlePath(outPath, filename)
+
 		file, err := os.Create(filePath)
 		if err != nil {
 			log.Println("create md failed:", err)
 			continue
 		}
-		defer file.Close()
+
 		content := article.Content
 		if article.Extension == "txt" {
 			// markdown line wrapping
@@ -211,6 +244,7 @@ func CreateArticles(articles []Article, outPath string) {
 		if err != nil {
 			log.Println("write md failed:", err)
 		}
+		_ = file.Close()
 	}
 }
 
@@ -225,20 +259,56 @@ func CreateCategory(folder Folder, outPath string) {
 		return categories[i].Rank < categories[j].Rank
 	})
 
-	for _, category := range categories {
-		folderPath := strings.Trim(category.Name, " ")
-		categoryPath := path.Join(outPath, folderPath)
-		_ = os.MkdirAll(categoryPath, 0755)
+	grouped, standalone := SplitArticlesByCategory(folder.Articles, categories)
 
-		var curArticleList []Article
-		for _, a := range folder.Articles {
-			if math.Abs(float64(a.Rank-category.Rank)) < 9999 {
-				curArticleList = append(curArticleList, a)
+	for _, category := range categories {
+		categoryName := SanitizePathName(category.Name)
+		categoryPath := filepath.Join(outPath, categoryName)
+		if err := os.MkdirAll(categoryPath, 0755); err != nil {
+			log.Println("create category folder failed:", err)
+			continue
+		}
+
+		CreateArticles(grouped[category.ID], categoryPath)
+	}
+
+	if len(standalone) > 0 {
+		CreateArticles(standalone, outPath)
+	}
+}
+
+func SplitArticlesByCategory(articles []Article, categories []Category) (map[string][]Article, []Article) {
+	grouped := make(map[string][]Article)
+	categoryByID := make(map[string]Category, len(categories))
+	for _, c := range categories {
+		categoryByID[c.ID] = c
+	}
+
+	var standalone []Article
+	for _, article := range articles {
+		categoryID := strings.TrimSpace(article.CategoryID)
+		if categoryID != "" {
+			if _, ok := categoryByID[categoryID]; ok {
+				grouped[categoryID] = append(grouped[categoryID], article)
+				continue
 			}
 		}
-		sort.Slice(curArticleList, func(i, j int) bool {
-			return curArticleList[i].Rank < curArticleList[j].Rank
-		})
-		CreateArticles(curArticleList, categoryPath)
+
+		idx := MatchCategoryByRank(article.Rank, categories)
+		if idx >= 0 {
+			grouped[categories[idx].ID] = append(grouped[categories[idx].ID], article)
+			continue
+		}
+		standalone = append(standalone, article)
 	}
+	return grouped, standalone
+}
+
+func MatchCategoryByRank(articleRank int, categories []Category) int {
+	for i, c := range categories {
+		if articleRank >= c.Rank && articleRank-c.Rank < 9999 {
+			return i
+		}
+	}
+	return -1
 }
