@@ -18,7 +18,6 @@ import (
 
 var needMeta = false
 var db *sql.DB
-var err error
 
 func main() {
 	args := os.Args
@@ -28,7 +27,12 @@ func main() {
 	}
 
 	filePath := args[1]
-	filename := strings.Split(filepath.Base(filePath), ".")[0]
+	filename := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
+	if filename == "" {
+		filename = "purewriter_export"
+	}
+
+	var err error
 	db, err = sql.Open("sqlite", filePath)
 	if err != nil {
 		log.Fatal(err)
@@ -50,7 +54,7 @@ func main() {
 	defer db.Close()
 
 	var folderList []Folder
-	query := `SELECT f.id, f.name, f.createdTime, COALESCE(f.description, '') as description,COALESCE(f.tags, '') as tags, f.rank, COALESCE(f.rankMode, '') as rankMode FROM Folder f WHERE NOT f.id=?`
+	query := `SELECT f.id, f.name, f.createdTime, COALESCE(f.description, '') as description, COALESCE(f.tags, '') as tags, f.rank, COALESCE(f.rankMode, '') as rankMode FROM Folder f WHERE f.id!=? AND COALESCE(f.deleted, 0)=0`
 	rows, err := db.Query(query, "PW_Trash")
 	if err != nil {
 		log.Fatal(err)
@@ -62,43 +66,90 @@ func main() {
 		if err = rows.Scan(&folder.ID, &folder.Name, &folder.CreatedTime, &folder.Description, &folder.Tags, &folder.Rank, &folder.RankMode); err != nil {
 			log.Fatal(err)
 		}
-		query = `SELECT a.id, COALESCE(a.title, '') as title, a.content, COALESCE(a.summary, '') as summary, COALESCE(a.count, 0) as  count, a.extension, a.folderId, COALESCE(a.categoryId, '') as  categoryId, a.rank, a.updateTime, a.createTime FROM  Article a WHERE a.folderId=?`
-		as, err := db.Query(query, folder.ID)
+
+		folder.Articles, err = LoadArticles(folder.ID)
 		if err != nil {
 			log.Fatal(err)
 		}
-		for as.Next() {
-			var article Article
-			if err = as.Scan(&article.ID, &article.Title, &article.Content, &article.Summary, &article.Count, &article.Extension, &article.FolderID, &article.CategoryID, &article.Rank, &article.UpdateTime, &article.CreateTime); err != nil {
-				log.Fatal(err)
-			}
-			folder.Articles = append(folder.Articles, article)
+
+		folder.Categories, err = LoadCategories(folder.ID)
+		if err != nil {
+			log.Fatal(err)
 		}
+
 		folderList = append(folderList, folder)
 	}
+	if err = rows.Err(); err != nil {
+		log.Fatal(err)
+	}
+
 	CreateFolder(filename, folderList)
 
 	log.Println("done. press any key to exit.")
 	bufio.NewReader(os.Stdin).ReadBytes('\n')
 }
 
-func CreateFolder(folderName string, folderList []Folder) {
-	_, err := os.Stat(folderName)
+func LoadArticles(folderID string) ([]Article, error) {
+	query := `SELECT a.id, COALESCE(a.title, '') as title, a.content, COALESCE(a.summary, '') as summary, COALESCE(a.count, 0) as count, a.extension, a.folderId, COALESCE(a.categoryId, '') as categoryId, a.rank, a.updateTime, a.createTime FROM Article a WHERE a.folderId=? AND COALESCE(a.deleted, 0)=0 ORDER BY a.rank ASC, a.createTime ASC`
+	rows, err := db.Query(query, folderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var articles []Article
+	for rows.Next() {
+		var article Article
+		if err = rows.Scan(&article.ID, &article.Title, &article.Content, &article.Summary, &article.Count, &article.Extension, &article.FolderID, &article.CategoryID, &article.Rank, &article.UpdateTime, &article.CreateTime); err != nil {
+			return nil, err
+		}
+		articles = append(articles, article)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return articles, nil
+}
+
+func LoadCategories(folderID string) ([]Category, error) {
+	query := `SELECT c.id, COALESCE(c.name, '') as name, c.folderID, COALESCE(c.description, '') as description, c.rank, c.updateTime, c.createdTime FROM Category c WHERE c.folderId=? AND COALESCE(c.deleted, 0)=0 ORDER BY c.rank ASC`
+	rows, err := db.Query(query, folderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var categories []Category
+	for rows.Next() {
+		var category Category
+		if err = rows.Scan(&category.ID, &category.Name, &category.FolderID, &category.Description, &category.Rank, &category.UpdateTime, &category.CreatedTime); err != nil {
+			return nil, err
+		}
+		categories = append(categories, category)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return categories, nil
+}
+
+func CreateFolder(rootPath string, folderList []Folder) {
+	_, err := os.Stat(rootPath)
 	if os.IsNotExist(err) {
-		_ = os.MkdirAll(folderName, 0755)
+		_ = os.MkdirAll(rootPath, 0755)
 	}
 	for _, folder := range folderList {
-
 		folderPath := strings.Trim(folder.Name, " ")
-		outPath := path.Join(folderName, folderPath)
+		outPath := path.Join(rootPath, folderPath)
 
 		_ = os.MkdirAll(outPath, 0755)
-		err := CreateFolderMeta(folder, outPath)
+		err = CreateFolderMeta(folder, outPath)
 		if err != nil {
 			log.Println("create meta.json failed:", err)
 		}
 		log.Println("parse book:", folder.Name)
-		if folder.RankMode == "RANK" {
+
+		if folder.RankMode == "RANK" || len(folder.Categories) > 0 {
 			CreateCategory(folder, outPath)
 			continue
 		}
@@ -116,7 +167,7 @@ func CreateFolderMeta(folder Folder, outPath string) error {
 		"description": folder.Description,
 		"tags":        folder.Tags,
 	}, "", "  ")
-	_, err := file.Write(data)
+	_, err = file.Write(data)
 	return err
 }
 
@@ -164,16 +215,17 @@ func CreateArticles(articles []Article, outPath string) {
 }
 
 func CreateCategory(folder Folder, outPath string) {
-	query := `SELECT c.id, COALESCE(c.name, '') as name, c.folderID, COALESCE(c.description, '') as description, c.rank, c.updateTime, c.createdTime FROM  Category c WHERE c.folderId=? ORDER BY c.rank ASC`
-	as, err := db.Query(query, folder.ID)
-	if err != nil {
-		log.Fatal(err)
+	if len(folder.Categories) == 0 {
+		CreateArticles(folder.Articles, outPath)
+		return
 	}
-	for as.Next() {
-		var category Category
-		if err = as.Scan(&category.ID, &category.Name, &category.FolderID, &category.Description, &category.Rank, &category.UpdateTime, &category.CreatedTime); err != nil {
-			log.Fatal(err)
-		}
+
+	categories := append([]Category(nil), folder.Categories...)
+	sort.Slice(categories, func(i, j int) bool {
+		return categories[i].Rank < categories[j].Rank
+	})
+
+	for _, category := range categories {
 		folderPath := strings.Trim(category.Name, " ")
 		categoryPath := path.Join(outPath, folderPath)
 		_ = os.MkdirAll(categoryPath, 0755)

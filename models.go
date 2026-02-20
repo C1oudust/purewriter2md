@@ -8,6 +8,7 @@ type Folder struct {
 	Rank        int
 	RankMode    string
 	Articles    []Article
+	Categories  []Category
 
 	CreatedTime int64
 }
